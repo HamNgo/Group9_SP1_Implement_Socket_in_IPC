@@ -16,6 +16,8 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include "protocol.h"
+#include "utils.h"
+#include <limits.h>
 
 /* ================= Biến toàn cục ================= */
 
@@ -132,22 +134,34 @@ void* client_handler(void* arg) {
         }
         buffer[header.data_len] = '\0';
 
-        // Ghi nhật ký vào hệ thống via Syslog (thay cho stdout)
-        syslog(LOG_INFO, "Nhan file '%s' (%u bytes) tu Client PID: %d",
-               header.filename, header.data_len, header.client_pid);
+        // Validate processing mode and verify data integrity (checksum)
+        if (header.mode >= PROC_COUNT) {
+            send_reply(client_fd, &reply, STATUS_ERR_PROTO, 0, "Error: unknown processing mode %u.", header.mode);
+            goto done;
+        }
+        uint32_t calc = fnv1a32(buffer, header.data_len);
+        if (calc != header.checksum) {
+            syslog(LOG_WARNING, "Checksum mismatch for '%s': got 0x%08x, expected 0x%08x",
+                   header.filename, calc, header.checksum);
+            send_reply(client_fd, &reply, STATUS_ERR_CHECKSUM, 0,
+                       "Error: checksum mismatch (client 0x%08x, server 0x%08x). Data rejected.",
+                       header.checksum, calc);
+            goto done;
+        }
 
-        /*
-         * TODO: Thành viên 2 (Hàm Ngô) sẽ tích hợp hàm ghi nối file an toàn với Mutex tại đây:
-         *
-         * if (write_to_output_file(header.client_pid, header.filename, buffer, header.data_len) < 0) {
-         *     send_reply(client_fd, &reply, STATUS_ERR_IO, 0, "Loi: Khong ghi duoc output.txt");
-         *     goto done;
-         * }
-         */
+        // Ghi nhật ký vào hệ thống via Syslog (thay cho stdout)
+        syslog(LOG_INFO, "Received '%s' (%u bytes, mode=%s) from client PID %u",
+               header.filename, header.data_len, proc_mode_name(header.mode), header.client_pid);
+
+        char summary[160];
+        if (process_and_store(header.client_pid, header.filename, header.mode, header.checksum,
+                              buffer, header.data_len, summary, sizeof(summary)) < 0) {
+            send_reply(client_fd, &reply, STATUS_ERR_IO, 0, "Error: could not write output file.");
+            goto done;
+        }
 
         send_reply(client_fd, &reply, STATUS_OK, header.data_len,
-                   "Thanh cong: Da nhan %u bytes tu file %s",
-                   header.data_len, header.filename);
+                   "Processed '%.40s' (%u bytes) -> %s", header.filename, header.data_len, summary);
     }
     else {
         send_reply(client_fd, &reply, STATUS_ERR_PROTO, 0, "Loi: Loai tin nhan khong ho tro.");
@@ -286,8 +300,25 @@ static int create_listen_socket(void) {
 
 int main(int argc, char** argv) {
     // Truyền tham số -f khi chạy lệnh để debug foreground, mặc định chạy Daemon ngầm
-    int foreground = (argc > 1 && strcmp(argv[1], "-f") == 0);
+    int foreground = 0;
     int ready_fd = -1;
+    const char* out_arg = DEFAULT_OUTPUT_FILE;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-f") == 0) foreground = 1;
+        else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_arg = argv[++i];
+        else { fprintf(stderr, "Usage: %s [-f] [-o output_file]\n", argv[0]); return 2; }
+    }
+
+    // Daemon se chdir("/") nen phai doi duong dan output sang tuyet doi TRUOC khi daemonize
+    char out_abs[PATH_MAX];
+    if (out_arg[0] == '/') {
+        snprintf(out_abs, sizeof(out_abs), "%s", out_arg);
+    } else {
+        char cwd[PATH_MAX - 256];
+        if (!getcwd(cwd, sizeof(cwd))) { perror("getcwd"); return 1; }
+        snprintf(out_abs, sizeof(out_abs), "%s/%s", cwd, out_arg);
+    }
+    utils_set_output_path(out_abs);
 
     if (!foreground) {
         ready_fd = daemonize();
@@ -310,11 +341,12 @@ int main(int argc, char** argv) {
     }
 
     create_pid_file();
-    syslog(LOG_INFO, "Socket Daemon running at %s (PID: %d)", SOCKET_PATH, getpid());
+    syslog(LOG_INFO, "Socket Daemon running at %s (PID: %d), output=%s", SOCKET_PATH, getpid(), out_abs);
+    write_system_log("Server started");
     notify_parent(ready_fd, 1, NULL);
     
     if (foreground) {
-        printf("[SERVER] Dang chay foreground (PID %d). Nhan Ctrl+C de dung.\n", getpid());
+        printf("[SERVER] Dang chay foreground (PID %d), output=%s. Nhan Ctrl+C de dung.\n", getpid(), out_abs);
     }
 
     // Vòng lặp chính chấp nhận kết nối và tạo Luồng
@@ -372,10 +404,7 @@ int main(int argc, char** argv) {
     }
     pthread_mutex_unlock(&g_cnt_lock);
 
-    /*
-     * TODO: Thành viên 3 (Khánh Linh) sẽ thêm thao tác ghi log "[SYSTEM] Shutdown gracefully"
-     * vào output.txt và dọn dẹp khóa Mutex chung tại đây trước khi thoát.
-     */
+    write_system_log("Shutdown gracefully");
 
     unlink(PID_FILE);
     syslog(LOG_INFO, "Server da dung an toan.");

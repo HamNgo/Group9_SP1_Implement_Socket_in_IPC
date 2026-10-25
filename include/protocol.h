@@ -1,89 +1,64 @@
- /*
-
- * protocol.h - Giao thuc chung giua Client va Server (UNIX Domain Socket).
-
- * Moi yeu cau gom:  [msg_header_t] + [data_len byte du lieu]
-
- * Server tra loi:   [reply_t]
-
+/**
+ * Project: Topic 25 - Sockets in IPC
+ * Class: SP(1).en2026 - Group 9 VKU
+ * File: include/protocol.h
+ *
+ * Client <-> Server protocol over a UNIX domain socket (SOCK_STREAM).
+ *   Client sends : [msg_header_t][data_len bytes of file content]
+ *   Server replies: [reply_t]
  */
-
 #ifndef PROTOCOL_H
-
 #define PROTOCOL_H
 
-
 #include <stdint.h>
+#include <stddef.h>
 
+#define SOCKET_PATH   "/tmp/ipc_group9_stream.sock"
+#define PID_FILE      "/tmp/ipc_group9_server.pid"
+#define DEFAULT_OUTPUT_FILE "output.txt"
 
-#define SOCKET_PATH     "/tmp/ipc_server.sock"   /* duong dan UNIX socket */
-
-#define PID_FILE        "/tmp/ipc_server.pid"    /* de script demo tim PID */
-
-
-#define PROTO_MAGIC     0x49504331u              /* "IPC1" - nhan dien goi tin */
-
-#define MAX_NAME_LEN    128                      /* do dai toi da ten file */
-
-#define MAX_FILE_SIZE   (10u * 1024u * 1024u)    /* gioi han 10 MB / file */
-
-#define MAX_REPLY_LEN   160
-
+#define PROTO_MAGIC    0x49504339u          /* "IPC9" */
+#define MAX_NAME_LEN   128
+#define MAX_REPLY_LEN  256
+#define MAX_FILE_SIZE  (10u * 1024u * 1024u) /* 10 MB */
 
 typedef enum {
-
-    MSG_SEND_FILE = 1,   /* gui noi dung file de server xu ly + ghi output */
-
-    MSG_PING      = 2    /* kiem tra server con song */
-
+    MSG_PING = 1,
+    MSG_SEND_FILE = 2
 } msg_type_t;
 
+/* What the server should do with the file (the "offloaded task") */
+typedef enum {
+    PROC_STATS = 0,     /* analyze only: lines, words, longest/top word */
+    PROC_UPPER = 1,     /* analyze + convert text to UPPERCASE */
+    PROC_REVERSE = 2,   /* analyze + reverse the order of lines */
+    PROC_COUNT
+} proc_mode_t;
 
 typedef enum {
-
-    STATUS_OK          = 0,
-
-    STATUS_ERR_PROTO   = 1,   /* goi tin sai dinh dang */
-
-    STATUS_ERR_TOO_BIG = 2,   /* file vuot MAX_FILE_SIZE */
-
-    STATUS_ERR_IO      = 3,   /* loi doc/ghi file o server */
-
-    STATUS_ERR_BUSY    = 4    /* server khong cap duoc thread / bo nho */
-
+    STATUS_OK = 0,
+    STATUS_ERR_PROTO,
+    STATUS_ERR_TOO_BIG,
+    STATUS_ERR_BUSY,
+    STATUS_ERR_IO,
+    STATUS_ERR_CHECKSUM
 } status_t;
 
-
-/* Tieu de goi tin Client -> Server */
-
 typedef struct __attribute__((packed)) {
-
-    uint32_t magic;                   /* PROTO_MAGIC */
-
-    uint32_t type;                    /* msg_type_t */
-
-    int32_t  client_pid;              /* PID cua client (de ghi log) */
-
-    uint32_t data_len;                /* so byte du lieu theo sau header */
-
-    char     filename[MAX_NAME_LEN];  /* ten file goc (chi de hien thi) */
-
+    uint32_t magic;
+    uint32_t type;                 /* msg_type_t */
+    uint32_t client_pid;
+    uint32_t data_len;             /* bytes of file content following the header */
+    uint32_t mode;                 /* proc_mode_t */
+    uint32_t checksum;             /* FNV-1a 32-bit of the content */
+    char     filename[MAX_NAME_LEN];
 } msg_header_t;
 
-
-/* Phan hoi Server -> Client */
-
 typedef struct __attribute__((packed)) {
-
     uint32_t magic;
-
-    uint32_t status;                  /* status_t */
-
-    uint32_t bytes_written;           /* so byte du lieu da xu ly */
-
-    char     message[MAX_REPLY_LEN];  /* thong bao doc duoc */
-
+    uint32_t status;               /* status_t */
+    uint32_t bytes_written;
+    char     message[MAX_REPLY_LEN];
 } reply_t;
 
-
-#endif /* PROTOCOL_H */ 
+#endif /* PROTOCOL_H */

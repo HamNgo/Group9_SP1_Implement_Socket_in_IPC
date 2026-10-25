@@ -32,11 +32,9 @@ $(OBJ)/%.o: src/%.c $(wildcard include/*.h) | $(OBJ)
 $(BIN) $(OBJ):
 	mkdir -p $@
 
-# make demo: chạy lần lượt 3 kịch bản (khi thành viên 3 đã có script)
+# make demo: narrated single-client demo (multi-client + signal demos come later)
 demo: all
 	./scripts/demo_single.sh
-	./scripts/demo_multi_client.sh
-	./scripts/demo_signal.sh
 
 clean:
 	rm -rf $(BIN) $(OBJ)
