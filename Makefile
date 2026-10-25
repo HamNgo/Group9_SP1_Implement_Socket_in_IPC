@@ -1,24 +1,42 @@
+# Makefile - chỉ cần gõ 'make' là ra bin/server (và bin/client khi đã có src/client.c)
+#
+# Dùng wildcard nên file của thành viên 2 và 3 (client.c, utils.c) chưa có thì
+# vẫn build được phần đã có; có rồi thì tự được ghép vào, không phải sửa Makefile.
 
-cat << 'EOF' > Makefile
+CC      := gcc
+CFLAGS  := -std=gnu11 -Wall -Wextra -O2 -g -Iinclude -pthread
+LDFLAGS := -pthread
 
+BIN := bin
+OBJ := obj
 
-# Makefile - Topic 25: Sockets in IPC
-# Course: SP(1).en2026 - Group 9 VKU
-# Author: Vo Thanh Long - 23IT147
+UTILS_SRC  := $(wildcard src/utils.c)
+SERVER_OBJ := $(OBJ)/server.o $(patsubst src/%.c,$(OBJ)/%.o,$(UTILS_SRC))
+CLIENT_OBJ := $(patsubst src/%.c,$(OBJ)/%.o,$(wildcard src/client.c)) \
+              $(patsubst src/%.c,$(OBJ)/%.o,$(UTILS_SRC))
 
-CC = gcc
-CFLAGS = -Wall -Wextra -pthread -I./common
+TARGETS := $(BIN)/server $(if $(wildcard src/client.c),$(BIN)/client)
 
-all:
-	@echo "=========================================================="
-	@echo "SP(1).en2026 - Group 9 VKU | Leader: Vo Thanh Long 23IT147"
-	@echo "Building Topic 25: Multi-threaded Sockets in IPC..."
-	@echo "=========================================================="
-	@echo "Status: Protocol and workspace initialized for 4 members."
+all: $(TARGETS)
+
+$(BIN)/server: $(SERVER_OBJ) | $(BIN)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BIN)/client: $(CLIENT_OBJ) | $(BIN)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+# Sửa bất kỳ file .h nào thì build lại các file .o
+$(OBJ)/%.o: src/%.c $(wildcard include/*.h) | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BIN) $(OBJ):
+	mkdir -p $@
+
+# make demo: narrated single-client demo (multi-client + signal demos come later)
+demo: all
+	./scripts/demo_single.sh
 
 clean:
-	rm -f /tmp/ipc_group9_*.sock
-	rm -f output.txt
-	@echo "Cleaned up temporary socket files and logs."
+	rm -rf $(BIN) $(OBJ)
 
-.PHONY: all clean
+.PHONY: all demo clean

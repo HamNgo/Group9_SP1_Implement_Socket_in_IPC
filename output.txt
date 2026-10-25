@@ -1,0 +1,44 @@
+[2026-10-25 18:22:17] [SYSTEM] Server started
+============================================================
+[2026-10-25 18:22:23] Request from client PID=12019
+  File      : input.txt
+  Mode      : STATS
+  Size      : 160 bytes
+  Checksum  : 0x0243ab95 (verified)
+  Result    : lines=3 words=28 longest="descriptor" top="the"(x4)
+  Proc time : 0.073 ms
+--- processed content ---
+The socket connects the client and the server.
+A socket is a file descriptor, and every socket needs an address.
+Unix domain sockets stay on the local machine.
+--- end ---
+
+============================================================
+[2026-10-25 18:22:30] Request from client PID=12024
+  File      : input.txt
+  Mode      : UPPERCASE
+  Size      : 160 bytes
+  Checksum  : 0x0243ab95 (verified)
+  Result    : lines=3 words=28 longest="descriptor" top="the"(x4)
+  Proc time : 0.026 ms
+--- processed content ---
+THE SOCKET CONNECTS THE CLIENT AND THE SERVER.
+A SOCKET IS A FILE DESCRIPTOR, AND EVERY SOCKET NEEDS AN ADDRESS.
+UNIX DOMAIN SOCKETS STAY ON THE LOCAL MACHINE.
+--- end ---
+
+============================================================
+[2026-10-25 18:22:42] Request from client PID=12030
+  File      : input.txt
+  Mode      : REVERSE-LINES
+  Size      : 160 bytes
+  Checksum  : 0x0243ab95 (verified)
+  Result    : lines=3 words=28 longest="descriptor" top="the"(x4)
+  Proc time : 0.024 ms
+--- processed content ---
+Unix domain sockets stay on the local machine.
+A socket is a file descriptor, and every socket needs an address.
+The socket connects the client and the server.
+--- end ---
+
+[2026-10-25 18:24:15] [SYSTEM] Shutdown gracefully
