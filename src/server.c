@@ -171,7 +171,6 @@ done:
     // Giải phóng tài nguyên, đóng socket và cập nhật số luồng active
     free(buffer);
     close(client_fd);
-    
     pthread_mutex_lock(&g_cnt_lock);
     g_active--;
     pthread_cond_broadcast(&g_cnt_cv);
@@ -394,17 +393,26 @@ int main(int argc, char** argv) {
     unlink(SOCKET_PATH);
 
     // Đợi tất cả các luồng đang xử lý hoàn tất (tối đa 30s)
-    struct timespec dl;
-    clock_gettime(CLOCK_REALTIME, &dl);
-    dl.tv_sec += 30;
-    
     pthread_mutex_lock(&g_cnt_lock);
+
     while (g_active > 0) {
-        if (pthread_cond_timedwait(&g_cnt_cv, &g_cnt_lock, &dl) == ETIMEDOUT) break;
+    pthread_cond_wait(&g_cnt_cv, &g_cnt_lock);
     }
+
     pthread_mutex_unlock(&g_cnt_lock);
 
+    // write final shutdown log
     write_system_log("Shutdown gracefully");
+
+    // Destroy synchronization objects after all workers finish
+    int cond_ret = pthread_cond_destroy(&g_cnt_cv);
+    int mutex_ret = pthread_mutex_destroy(&g_cnt_lock);
+
+    if (cond_ret != 0 || mutex_ret != 0) {
+    syslog(LOG_ERR,
+           "Synchronization cleanup failed: cond=%d, mutex=%d",
+           cond_ret, mutex_ret);
+}
 
     unlink(PID_FILE);
     syslog(LOG_INFO, "Server da dung an toan.");
