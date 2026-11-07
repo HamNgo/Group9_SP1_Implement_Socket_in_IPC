@@ -301,12 +301,15 @@ static int create_listen_socket(void) {
 int main(int argc, char** argv) {
     // Truyền tham số -f khi chạy lệnh để debug foreground, mặc định chạy Daemon ngầm
     int foreground = 0;
+    int locking = 1, slow_io = 0;   // --no-lock / --slow-io: only for the race-condition demo
     int ready_fd = -1;
     const char* out_arg = DEFAULT_OUTPUT_FILE;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-f") == 0) foreground = 1;
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_arg = argv[++i];
-        else { fprintf(stderr, "Usage: %s [-f] [-o output_file]\n", argv[0]); return 2; }
+        else if (strcmp(argv[i], "--no-lock") == 0) locking = 0;
+        else if (strcmp(argv[i], "--slow-io") == 0) slow_io = 1;
+        else { fprintf(stderr, "Usage: %s [-f] [-o output_file] [--no-lock] [--slow-io]\n", argv[0]); return 2; }
     }
 
     // Daemon se chdir("/") nen phai doi duong dan output sang tuyet doi TRUOC khi daemonize
@@ -319,6 +322,8 @@ int main(int argc, char** argv) {
         snprintf(out_abs, sizeof(out_abs), "%s/%s", cwd, out_arg);
     }
     utils_set_output_path(out_abs);
+    utils_set_locking(locking);
+    utils_set_slow_io(slow_io);
 
     if (!foreground) {
         ready_fd = daemonize();
@@ -342,7 +347,12 @@ int main(int argc, char** argv) {
 
     create_pid_file();
     syslog(LOG_INFO, "Socket Daemon running at %s (PID: %d), output=%s", SOCKET_PATH, getpid(), out_abs);
-    write_system_log("Server started");
+    {
+        char m[96];
+        snprintf(m, sizeof(m), "Server started PID=%d (output mutex: %s%s)",
+                 (int)getpid(), locking ? "ON" : "OFF", slow_io ? ", slow-io" : "");
+        write_system_log(m);
+    }
     notify_parent(ready_fd, 1, NULL);
     
     if (foreground) {
@@ -404,7 +414,11 @@ int main(int argc, char** argv) {
     }
     pthread_mutex_unlock(&g_cnt_lock);
 
-    write_system_log("Shutdown gracefully");
+    {
+        char m[64];
+        snprintf(m, sizeof(m), "Shutdown gracefully PID=%d", (int)getpid());
+        write_system_log(m);
+    }
 
     unlink(PID_FILE);
     syslog(LOG_INFO, "Server da dung an toan.");

@@ -7,13 +7,23 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
+#include <pthread.h>
 #include "protocol.h"
 #include "utils.h"
 
-/* NOTE: no mutex yet (planned for the multi-client stage). Each entry is built
- * in memory and written with ONE write() on an O_APPEND descriptor, so the
- * kernel appends it at the end of the file in a single step. */
+/* Output file is shared by every handler thread, so writes are serialized with a
+ * mutex. Two switches exist ONLY for the race-condition demo:
+ *   g_lock_on = 0 : mutex disabled (naive implementation)
+ *   g_slow_io = 1 : entry is written in 3 separate pieces with a 5 ms pause between
+ *                   them (simulates a slow disk and widens the race window)
+ * Normal operation: lock on, slow-io off => one write() per entry under the mutex. */
+static pthread_mutex_t g_out_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_lock_on = 1;
+static int g_slow_io = 0;
 static char g_out_path[PATH_MAX] = DEFAULT_OUTPUT_FILE;
+
+void utils_set_locking(int on) { g_lock_on = on; }
+void utils_set_slow_io(int on) { g_slow_io = on; }
 
 void utils_set_output_path(const char *path) {
     snprintf(g_out_path, sizeof(g_out_path), "%s", path);
@@ -43,11 +53,37 @@ static void timestamp(char *buf, size_t n) {
 }
 
 static int append_to_output(const char *buf, size_t n) {
+    if (g_lock_on) pthread_mutex_lock(&g_out_lock);
     int fd = open(g_out_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return -1;
-    ssize_t w = write(fd, buf, n);
-    int rc = (w == (ssize_t)n) ? 0 : -1;
-    close(fd);
+    int rc = -1;
+    if (fd >= 0) {
+        rc = (write(fd, buf, n) == (ssize_t)n) ? 0 : -1;
+        close(fd);
+    }
+    if (g_lock_on) pthread_mutex_unlock(&g_out_lock);
+    return rc;
+}
+
+/* Write one whole entry. s1/s2 mark where the header ends and the footer begins. */
+static int store_entry(const char *buf, size_t total, size_t s1, size_t s2) {
+    if (g_lock_on) pthread_mutex_lock(&g_out_lock);
+    int fd = open(g_out_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int rc = -1;
+    if (fd >= 0) {
+        if (!g_slow_io) {
+            rc = (write(fd, buf, total) == (ssize_t)total) ? 0 : -1;
+        } else {
+            size_t cut[4] = {0, s1, s2, total};
+            rc = 0;
+            for (int i = 0; i < 3; i++) {
+                size_t l = cut[i + 1] - cut[i];
+                if (write(fd, buf + cut[i], l) != (ssize_t)l) rc = -1;
+                if (i < 2) usleep(5000);
+            }
+        }
+        close(fd);
+    }
+    if (g_lock_on) pthread_mutex_unlock(&g_out_lock);
     return rc;
 }
 
@@ -184,17 +220,18 @@ int process_and_store(uint32_t client_pid, const char *filename, uint32_t mode,
         st.lines, st.words, st.longest, st.top, st.top_count, ms);
     if (n < 0 || (size_t)n >= cap) { free(out); free(buf); return -1; }
 
-    size_t pos = (size_t)n;
+    size_t split1 = (size_t)n;
+    size_t pos = split1;
     memcpy(buf + pos, out, out_len);
     pos += out_len;
     if (out_len > 0 && out[out_len - 1] != '\n') buf[pos++] = '\n';
-    const char *tail = "--- end ---\n\n";
-    size_t tl = strlen(tail);
-    if (pos + tl > cap) { free(out); free(buf); return -1; }
-    memcpy(buf + pos, tail, tl);
-    pos += tl;
+    size_t split2 = pos;
+    /* footer carries the PID so every entry (and every piece of it) is traceable */
+    int tn = snprintf(buf + pos, cap - pos, "--- end [PID=%u] ---\n\n", client_pid);
+    if (tn < 0 || (size_t)tn >= cap - pos) { free(out); free(buf); return -1; }
+    pos += (size_t)tn;
 
-    int rc = append_to_output(buf, pos);
+    int rc = store_entry(buf, pos, split1, split2);
     free(out);
     free(buf);
     return rc;

@@ -1,20 +1,25 @@
-[2026-10-25 18:36:23] [SYSTEM] Server started
+################################################################
+# DEMO 1 - single client
+# one client sends a file in 3 processing modes, plus error cases
+# 2026-11-07 11:06:32 | demo_single.sh
+################################################################
+[2026-11-07 11:06:32] [SYSTEM] Server started PID=13251 (output mutex: ON)
 ============================================================
-[2026-10-25 18:36:25] Request from client PID=12347
+[2026-11-07 11:06:38] Request from client PID=13261
   File      : input.txt
   Mode      : STATS
   Size      : 160 bytes
   Checksum  : 0x0243ab95 (verified)
   Result    : lines=3 words=28 longest="descriptor" top="the"(x4)
-  Proc time : 0.102 ms
+  Proc time : 0.074 ms
 --- processed content ---
 The socket connects the client and the server.
 A socket is a file descriptor, and every socket needs an address.
 Unix domain sockets stay on the local machine.
---- end ---
+--- end [PID=13261] ---
 
 ============================================================
-[2026-10-25 18:36:26] Request from client PID=12351
+[2026-11-07 11:06:41] Request from client PID=13263
   File      : input.txt
   Mode      : UPPERCASE
   Size      : 160 bytes
@@ -25,20 +30,237 @@ Unix domain sockets stay on the local machine.
 THE SOCKET CONNECTS THE CLIENT AND THE SERVER.
 A SOCKET IS A FILE DESCRIPTOR, AND EVERY SOCKET NEEDS AN ADDRESS.
 UNIX DOMAIN SOCKETS STAY ON THE LOCAL MACHINE.
---- end ---
+--- end [PID=13263] ---
 
 ============================================================
-[2026-10-25 18:36:27] Request from client PID=12356
+[2026-11-07 11:06:42] Request from client PID=13266
   File      : input.txt
   Mode      : REVERSE-LINES
   Size      : 160 bytes
   Checksum  : 0x0243ab95 (verified)
   Result    : lines=3 words=28 longest="descriptor" top="the"(x4)
-  Proc time : 0.024 ms
+  Proc time : 0.021 ms
 --- processed content ---
 Unix domain sockets stay on the local machine.
 A socket is a file descriptor, and every socket needs an address.
 The socket connects the client and the server.
---- end ---
+--- end [PID=13266] ---
 
-[2026-10-25 18:36:29] [SYSTEM] Shutdown gracefully
+[2026-11-07 11:06:57] [SYSTEM] Shutdown gracefully PID=13251
+# ---- end of DEMO 1 ----
+
+################################################################
+# DEMO 2 / RUN A - multi-client, server started WITH --no-lock
+# EXPECTED: CORRUPTED entries below. This is intentional (race condition demo).
+# 3 clients at the same moment
+# 2026-11-07 11:07:31 | demo_multi_client.sh
+################################################################
+[2026-11-07 11:07:31] [SYSTEM] Server started PID=13334 (output mutex: OFF, slow-io)
+============================================================
+[2026-11-07 11:07:31] Request from client PID=13341
+  File      : c2.txt
+  Mode      : STATS
+  Size      : 78 bytes
+  Checksum  : 0xbca12ea5 (verified)
+  Result    : lines=3 words=18 longest="client" top="2"(x4)
+  Proc time : 0.079 ms
+--- processed content ---
+============================================================
+[2026-11-07 11:07:31] Request from client PID=13340
+  File      : c1.txt
+  Mode      : STATS
+  Size      : 78 bytes
+  Checksum  : 0xc037724d (verified)
+  Result    : lines=3 words=18 longest="client" top="1"(x4)
+  Proc time : 0.059 ms
+--- processed content ---
+============================================================
+[2026-11-07 11:07:31] Request from client PID=13342
+  File      : c3.txt
+  Mode      : STATS
+  Size      : 78 bytes
+  Checksum  : 0x21b4b425 (verified)
+  Result    : lines=3 words=18 longest="client" top="3"(x4)
+  Proc time : 0.085 ms
+--- processed content ---
+[c2] line 1 from client 2
+[c2] line 2 from client 2
+[c2] line 3 from client 2
+[c1] line 1 from client 1
+[c1] line 2 from client 1
+[c1] line 3 from client 1
+[c3] line 1 from client 3
+[c3] line 2 from client 3
+[c3] line 3 from client 3
+--- end [PID=13341] ---
+
+--- end [PID=13340] ---
+
+--- end [PID=13342] ---
+
+[2026-11-07 11:07:39] [SYSTEM] Shutdown gracefully PID=13334
+# ---- end of DEMO 2 / RUN A (the damage above is intentional) ----
+
+################################################################
+# DEMO 2 / RUN B - multi-client, server started WITH the mutex
+# EXPECTED: CLEAN entries below.
+# 3 clients at the same moment
+# 2026-11-07 11:07:42 | demo_multi_client.sh
+################################################################
+[2026-11-07 11:07:42] [SYSTEM] Server started PID=13389 (output mutex: ON, slow-io)
+============================================================
+[2026-11-07 11:07:42] Request from client PID=13393
+  File      : c1.txt
+  Mode      : STATS
+  Size      : 78 bytes
+  Checksum  : 0xc037724d (verified)
+  Result    : lines=3 words=18 longest="client" top="1"(x4)
+  Proc time : 0.071 ms
+--- processed content ---
+[c1] line 1 from client 1
+[c1] line 2 from client 1
+[c1] line 3 from client 1
+--- end [PID=13393] ---
+
+============================================================
+[2026-11-07 11:07:42] Request from client PID=13395
+  File      : c3.txt
+  Mode      : STATS
+  Size      : 78 bytes
+  Checksum  : 0x21b4b425 (verified)
+  Result    : lines=3 words=18 longest="client" top="3"(x4)
+  Proc time : 0.055 ms
+--- processed content ---
+[c3] line 1 from client 3
+[c3] line 2 from client 3
+[c3] line 3 from client 3
+--- end [PID=13395] ---
+
+============================================================
+[2026-11-07 11:07:42] Request from client PID=13394
+  File      : c2.txt
+  Mode      : STATS
+  Size      : 78 bytes
+  Checksum  : 0xbca12ea5 (verified)
+  Result    : lines=3 words=18 longest="client" top="2"(x4)
+  Proc time : 0.098 ms
+--- processed content ---
+[c2] line 1 from client 2
+[c2] line 2 from client 2
+[c2] line 3 from client 2
+--- end [PID=13394] ---
+
+[2026-11-07 11:07:45] [SYSTEM] Shutdown gracefully PID=13389
+# ---- end of DEMO 2 / RUN B ----
+
+################################################################
+# DEMO 3 - signals and shutdown
+# SERVER 1: survives a crashing client, then stopped politely (SIGTERM)
+# SERVER 2: killed hard (SIGKILL) - EXPECTED: it has NO 'Shutdown' line
+# SERVER 3: starts over SERVER 2's stale socket, then stopped politely
+# 2026-11-07 11:09:44 | demo_signal.sh
+################################################################
+[2026-11-07 11:09:48] [DEMO] starting SERVER 1
+[2026-11-07 11:09:48] [SYSTEM] Server started PID=13636 (output mutex: ON)
+[2026-11-07 11:09:51] [DEMO] step 2: client killed mid-transfer (SERVER 1, PID 13636, keeps running)
+[2026-11-07 11:09:55] [DEMO] step 3: SIGTERM sent to SERVER 1 (PID 13636) while a request is in flight
+============================================================
+[2026-11-07 11:09:56] Request from client PID=13671
+  File      : input.txt
+  Mode      : STATS
+  Size      : 160 bytes
+  Checksum  : 0x0243ab95 (verified)
+  Result    : lines=3 words=28 longest="descriptor" top="the"(x4)
+  Proc time : 0.118 ms
+--- processed content ---
+The socket connects the client and the server.
+A socket is a file descriptor, and every socket needs an address.
+Unix domain sockets stay on the local machine.
+--- end [PID=13671] ---
+
+[2026-11-07 11:09:56] [SYSTEM] Shutdown gracefully PID=13636
+[2026-11-07 11:09:58] [DEMO] starting SERVER 2
+[2026-11-07 11:09:58] [SYSTEM] Server started PID=13715 (output mutex: ON)
+[2026-11-07 11:09:59] [DEMO] step 4: SIGKILL sent to SERVER 2 (PID 13715) mid-request - no 'Shutdown' line will follow
+[2026-11-07 11:10:02] [DEMO] starting SERVER 3
+[2026-11-07 11:10:02] [SYSTEM] Server started PID=13747 (output mutex: ON)
+============================================================
+[2026-11-07 11:10:03] Request from client PID=13752
+  File      : input.txt
+  Mode      : STATS
+  Size      : 160 bytes
+  Checksum  : 0x0243ab95 (verified)
+  Result    : lines=3 words=28 longest="descriptor" top="the"(x4)
+  Proc time : 0.071 ms
+--- processed content ---
+The socket connects the client and the server.
+A socket is a file descriptor, and every socket needs an address.
+Unix domain sockets stay on the local machine.
+--- end [PID=13752] ---
+
+[2026-11-07 11:10:04] [DEMO] step 6: SIGTERM sent to SERVER 3 (PID 13747)
+[2026-11-07 11:10:04] [SYSTEM] Shutdown gracefully PID=13747
+# ---- end of DEMO 3 ----
+
+################################################################
+# DEMO 1 - single client
+# one client sends a file in 3 processing modes, plus error cases
+# 2026-11-07 11:20:18 | demo_single.sh
+################################################################
+[2026-11-07 11:20:18] [SYSTEM] Server started PID=14251 (output mutex: ON)
+============================================================
+[2026-11-07 11:20:24] Request from client PID=14261
+  File      : input.txt
+  Mode      : STATS
+  Size      : 344 bytes
+  Checksum  : 0x642d1d56 (verified)
+  Result    : lines=7 words=58 longest="communication" top="the"(x4)
+  Proc time : 0.102 ms
+--- processed content ---
+Hello everyone, I am a member of group 9.
+We've been working to implement and make demo for Sockets in Inter-process Communication (IPC).
+Here's some useful bit of information:
+
+- The socket connects the client and the server.
+- A socket is a file descriptor, and every socket needs an address.
+- Unix domain sockets stay on the local machine.
+--- end [PID=14261] ---
+
+============================================================
+[2026-11-07 11:20:31] Request from client PID=14345
+  File      : input.txt
+  Mode      : UPPERCASE
+  Size      : 344 bytes
+  Checksum  : 0x642d1d56 (verified)
+  Result    : lines=7 words=58 longest="communication" top="the"(x4)
+  Proc time : 0.033 ms
+--- processed content ---
+HELLO EVERYONE, I AM A MEMBER OF GROUP 9.
+WE'VE BEEN WORKING TO IMPLEMENT AND MAKE DEMO FOR SOCKETS IN INTER-PROCESS COMMUNICATION (IPC).
+HERE'S SOME USEFUL BIT OF INFORMATION:
+
+- THE SOCKET CONNECTS THE CLIENT AND THE SERVER.
+- A SOCKET IS A FILE DESCRIPTOR, AND EVERY SOCKET NEEDS AN ADDRESS.
+- UNIX DOMAIN SOCKETS STAY ON THE LOCAL MACHINE.
+--- end [PID=14345] ---
+
+============================================================
+[2026-11-07 11:20:32] Request from client PID=14348
+  File      : input.txt
+  Mode      : REVERSE-LINES
+  Size      : 344 bytes
+  Checksum  : 0x642d1d56 (verified)
+  Result    : lines=7 words=58 longest="communication" top="the"(x4)
+  Proc time : 0.039 ms
+--- processed content ---
+- Unix domain sockets stay on the local machine.
+- A socket is a file descriptor, and every socket needs an address.
+- The socket connects the client and the server.
+
+Here's some useful bit of information:
+We've been working to implement and make demo for Sockets in Inter-process Communication (IPC).
+Hello everyone, I am a member of group 9.
+--- end [PID=14348] ---
+
+[2026-11-07 11:20:35] [SYSTEM] Shutdown gracefully PID=14251
+# ---- end of DEMO 1 ----

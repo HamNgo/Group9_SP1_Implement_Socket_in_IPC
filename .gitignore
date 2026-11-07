@@ -2,7 +2,6 @@
 # File sinh ra khi build, không đưa lên git
 bin/
 obj/
-*.o
  
 # Kết quả chạy demo
 data/output.txt

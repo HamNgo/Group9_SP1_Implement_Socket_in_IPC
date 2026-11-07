@@ -7,7 +7,7 @@
 ## Project Overview
 Multi-threaded Local Task Offloading & Dual-mode Messaging Daemon via UNIX Domain Sockets (AF_UNIX).
 
-Current stage: **single-client task offloading**. A client reads an input file and sends it to
+Current stage: **task offloading with multiple clients, signal handling and graceful shutdown**. A client reads an input file and sends it to
 a server daemon over a UNIX domain socket. The server verifies and processes the data, appends
 a timestamped result to `output.txt`, and sends the result back to the client.
 
@@ -22,7 +22,10 @@ src/
   client.c          reads the input file, sends it, prints the server's reply
   utils.c           text analysis, transforms, checksum, timestamped output writing
 scripts/
-  demo_single.sh    narrated single-client demo
+  demo_single.sh        narrated single-client demo
+  demo_multi_client.sh  narrated multi-client demo: race condition vs mutex
+  demo_signal.sh        narrated signal demo: graceful shutdown, SIGKILL, recovery
+  history.sh            shared helper: banners/notes for the history file
 samples/
   input.txt         sample input for the demo
 ```
@@ -43,6 +46,12 @@ Requires `gcc` and `make` on Linux.
 ./bin/server -f -o output.txt  # foreground, logs to the terminal (Ctrl+C to stop)
 ```
 `-o` sets the output file (default `output.txt` in the current directory).
+
+Race-condition demo switches (not for normal use):
+```bash
+./bin/server --no-lock    # disable the output-file mutex
+./bin/server --slow-io    # write each entry in 3 pieces with a 5 ms pause (widens the race window)
+```
 
 **2. Send a file with the client**
 ```bash
@@ -68,19 +77,60 @@ kill -TERM $(cat /tmp/ipc_group9_server.pid)   # daemon mode
 The server stops accepting connections, waits up to 30 s for running handlers, writes
 `[SYSTEM] Shutdown gracefully` to the output file, and removes the socket and PID file.
 
-## Demo
+## Demos
 ```bash
-./scripts/demo_single.sh        # pauses at each step (press Enter)
-./scripts/demo_single.sh -n     # runs straight through
-make demo                       # same demo via make
+make demo                              # runs all three demos below in order
+./scripts/demo_single.sh [-n]          # demo 1: one client
+./scripts/demo_multi_client.sh [-n] [N]   # demo 2: N clients at once (default 3)
+./scripts/demo_signal.sh [-n]          # demo 3: signals and shutdown
 ```
-The demo covers: daemon start (PPID 1, no terminal), ping, the three processing modes,
-`output.txt`, error handling, the syslog lines, and graceful shutdown with `SIGTERM`.
+`-n` = run without pausing between steps.
+
+**Demo 1 (single client):** daemon start (PPID 1, no terminal), ping, the three processing
+modes, `output.txt`, error handling, the syslog lines, and graceful shutdown with `SIGTERM`.
+
+**Demo 2 (multi-client):** launches N clients (default 3) at the same moment against a server that
+handles each connection in its own thread. First the server runs with `--no-lock --slow-io`:
+every client gets `OK`, but the output file is corrupted (entries torn apart, lines from
+different clients mixed). Then the same test runs with the mutex: the file is clean. A checker
+in the script verifies both files and reports the result. Both runs are appended to `output.txt` under their own banners.
+
+**Demo 3 (signals):** starts three server processes one after the other and names them
+SERVER 1 / 2 / 3 (each with its own colour, PID and a roster of how it ended). It uses `client --slow` (sends the file in 5 chunks over ~2 s) to keep a
+request "in flight". It shows: (1) a client killed mid-transfer does not hurt the server
+(`SIGPIPE` ignored, handler thread cleaned up, partial data discarded); (2) `SIGTERM` during
+a request: the server stops accepting new connections at once, but finishes the request it
+already accepted, then removes its socket and PID file and logs `Shutdown gracefully`;
+(3) `SIGKILL`: no cleanup, stale socket and PID file left, no shutdown note; (4) restart over
+the stale socket works because the server probes it with `connect()` before reusing the path.
+
+## The history file (`output.txt`)
+All demos write into the same file, `output.txt`, and only ever **append** to it, so it is a
+history of everything that happened. Each demo announces itself first with a banner:
+```
+################################################################
+# DEMO 2 / RUN A - multi-client, server started WITH --no-lock
+# EXPECTED: CORRUPTED entries below. This is intentional (race condition demo).
+# 3 clients at the same moment
+# 2026-11-07 04:00:37 | demo_multi_client.sh
+################################################################
+```
+Other markers you will find in it:
+- `[SYSTEM] Server started PID=...` / `Shutdown gracefully PID=...`: written by the server. A
+  "started" line with no matching "Shutdown" line means that server was killed (SIGKILL).
+- `[DEMO] ...`: timeline notes written by the demo scripts (e.g. "SIGTERM sent to SERVER 1").
+- `# ---- end of DEMO ... ----`: closing line of each demo.
+
+Notes:
+- The deliberately corrupted section of DEMO 2 / RUN A stays in the file; its banner says so.
+- Each demo checks and displays only the part of the file written during its own run.
+- The file only grows. To start fresh: `make reset-history`.
 
 ## Error-handling test flags (client)
 ```bash
 ./bin/client --bad-checksum samples/input.txt   # server rejects corrupted data (ERR_CHECKSUM)
 ./bin/client --bad-magic    samples/input.txt   # server rejects a foreign protocol (ERR_PROTOCOL)
+./bin/client --slow         samples/input.txt   # send in 5 chunks, 500 ms apart (keeps a request in flight)
 ```
 
 ## Server log
@@ -101,5 +151,6 @@ journalctl -t ipc_server -n 20 --no-pager
 
 ## Status
 - [x] Single-client offloading, processing modes, checksum, graceful shutdown
-- [ ] Multi-client demo and mutex-protected output (next stage)
+- [x] Multi-client demo and mutex-protected output (race condition shown and fixed)
+- [x] Signal demo (`demo_signal.sh`): graceful shutdown, SIGKILL, stale-socket recovery
 - [ ] Dual-mode messaging (`SOCK_DGRAM`, public/private chat)

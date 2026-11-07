@@ -1,3 +1,7 @@
-The socket connects the client and the server.
-A socket is a file descriptor, and every socket needs an address.
-Unix domain sockets stay on the local machine.
+Hello everyone, I am a member of group 9.
+We've been working to implement and make demo for Sockets in Inter-process Communication (IPC).
+Here's some useful bit of information:
+
+- The socket connects the client and the server.
+- A socket is a file descriptor, and every socket needs an address.
+- Unix domain sockets stay on the local machine.

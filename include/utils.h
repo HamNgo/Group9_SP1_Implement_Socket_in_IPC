@@ -6,6 +6,10 @@
 /* Output file path (should be absolute: the daemon does chdir("/")) */
 void utils_set_output_path(const char *path);
 
+/* Race-demo switches (defaults: locking ON, slow-io OFF) */
+void utils_set_locking(int on);
+void utils_set_slow_io(int on);
+
 /* FNV-1a 32-bit checksum, used to verify data integrity across the socket */
 uint32_t fnv1a32(const void *data, size_t len);
 

@@ -54,18 +54,19 @@ static void usage(const char *p) {
     fprintf(stderr,
         "Usage: %s [-m stats|upper|reverse] <input_file>\n"
         "       %s --ping\n"
-        "Test flags: --bad-checksum  --bad-magic\n", p, p);
+        "Test flags: --bad-checksum  --bad-magic  --slow (send in 5 chunks, 500 ms apart)\n", p, p);
 }
 
 int main(int argc, char **argv) {
     uint32_t mode = PROC_STATS;
-    int ping = 0, bad_sum = 0, bad_magic = 0;
+    int ping = 0, bad_sum = 0, bad_magic = 0, slow = 0;
     const char *path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--ping")) ping = 1;
         else if (!strcmp(argv[i], "--bad-checksum")) bad_sum = 1;
         else if (!strcmp(argv[i], "--bad-magic")) bad_magic = 1;
+        else if (!strcmp(argv[i], "--slow")) slow = 1;
         else if (!strcmp(argv[i], "-m") && i + 1 < argc) {
             const char *m = argv[++i];
             if (!strcmp(m, "stats")) mode = PROC_STATS;
@@ -78,6 +79,7 @@ int main(int argc, char **argv) {
     }
     if (!ping && !path) { usage(argv[0]); return 2; }
     signal(SIGPIPE, SIG_IGN);
+    setvbuf(stdout, NULL, _IOLBF, 0);   /* keep stdout/stderr in order even when piped */
 
     msg_header_t h;
     memset(&h, 0, sizeof(h));
@@ -124,7 +126,24 @@ int main(int argc, char **argv) {
     fflush(stdout);
     /* If the server rejects us early it may close before we finish sending;
      * that is not fatal: we still try to read its explanation below. */
-    int send_failed = (send_all(fd, &h, sizeof(h)) < 0 || (len && send_all(fd, data, len) < 0));
+    int send_failed = 0;
+    if (send_all(fd, &h, sizeof(h)) < 0) {
+        send_failed = 1;
+    } else if (len) {
+        if (slow) {
+            /* demo: a slow/large transfer, so the request is still "in flight" for ~2 s */
+            size_t chunk = (len + 4) / 5;
+            printf("[CLIENT] slow mode: %zu bytes in chunks of %zu, 500 ms apart\n", len, chunk);
+            fflush(stdout);
+            for (size_t off = 0; off < len && !send_failed; off += chunk) {
+                size_t n = (len - off < chunk) ? len - off : chunk;
+                if (send_all(fd, data + off, n) < 0) send_failed = 1;
+                else if (off + n < len) usleep(500000);
+            }
+        } else if (send_all(fd, data, len) < 0) {
+            send_failed = 1;
+        }
+    }
     free(data);
 
     reply_t r;

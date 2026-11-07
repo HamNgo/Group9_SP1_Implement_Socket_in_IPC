@@ -2,12 +2,13 @@
 # Narrated demo: ONE client offloading a task to the UNIX-socket daemon.
 # Usage: ./scripts/demo_single.sh [-n]      (-n = no pauses between steps)
 cd "$(dirname "$0")/.." || exit 1
+source scripts/history.sh
 
 PAUSE=1
 [ "${1:-}" = "-n" ] && PAUSE=0
 [ -t 0 ] || PAUSE=0
 
-OUT="$PWD/output.txt"
+OUT="$HIST"
 PIDF=/tmp/ipc_group9_server.pid
 SOCK=/tmp/ipc_group9_stream.sock
 SAMPLE=samples/input.txt
@@ -41,7 +42,8 @@ show_logs() {
 if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
     echo "A server is already running (PID $(cat "$PIDF")). Stop it first."; exit 1
 fi
-rm -f "$OUT"
+hist_banner "DEMO 1 - single client" "one client sends a file in 3 processing modes, plus error cases"
+START=$(hist_size)
 
 step "1. Start the server as a daemon"
 say "double fork + setsid: it detaches from this terminal and runs in the background"
@@ -74,7 +76,9 @@ run ./bin/client -m reverse "$SAMPLE"
 pause
 
 step "6. What the server wrote to output.txt (with timestamps)"
-run cat "$OUT"
+echo "${B}\$ cat output.txt     (only the part written during this demo; the file keeps the history of all demos)${N}"
+hist_section "$START"
+echo
 pause
 
 step "7. Error handling"
@@ -101,4 +105,5 @@ run tail -n 1 "$OUT"
 say "client now fails cleanly because no server is listening:"
 ./bin/client "$SAMPLE"
 echo
+hist_end "end of DEMO 1"
 echo "${B}${G}Demo finished.${N}"
