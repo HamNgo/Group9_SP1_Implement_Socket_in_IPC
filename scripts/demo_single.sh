@@ -1,6 +1,3 @@
-
-    
-  
 #!/usr/bin/env bash
 # Demo 1: One client -> UNIX Socket -> daemon -> output file.
 # Usage: bash scripts/demo_single.sh [-n] (-n: no pauses)
@@ -18,14 +15,68 @@ PAUSE=1
 step()  { printf '\n=== %s ===\n' "$1"; }
 run()   { printf '$'; printf ' %q' "$@"; printf '\n'; "$@"; }
 pause() { [[ "$PAUSE" == 0 ]] || read -rp '[Enter to continue] ' _; }
-cleanup() {
-    # Only stop the daemon this script started.
-    if [[ -n "$SERVER_PID" && -r "$PIDF" ]] &&
-       [[ "$(cat "$PIDF")" == "$SERVER_PID" ]]; then
-        kill -TERM "$SERVER_PID" 2>/dev/null || true
-    fi
+# Check whether daemon is still alive (zombies count as stopped).
+
+daemon_alive() {
+    local pid="$1"
+    local state
+
+    # Check whether the process exists.
+    kill -0 "$pid" 2>/dev/null || return 1
+
+    # Read process state safely.
+    # The /proc entry may disappear while the daemon exits.
+    state=$(awk '$1 == "State:" {print $2; exit}' \
+        "/proc/$pid/status" 2>/dev/null) || return 1
+
+    # Missing process, zombie or dead process = not alive.
+    [[ -n "$state" && "$state" != "Z" && "$state" != "X" ]]
 }
-trap cleanup EXIT
+
+
+cleanup() {
+    [[ -n "$SERVER_PID" ]] || return 0
+
+    if daemon_alive "$SERVER_PID"; then
+        if [[ ! -r "$PIDF" ]] ||
+           [[ "$(cat "$PIDF")" != "$SERVER_PID" ]]; then
+            echo "[FAIL] Server PID verification failed" >&2
+            return 1
+        fi
+
+        if [[ "$(readlink -f "/proc/$SERVER_PID/exe" 2>/dev/null)" != "$PWD/bin/server" ]]; then
+            echo "[FAIL] Server executable mismatch" >&2
+            return 1
+        fi
+
+        if ! kill -TERM "$SERVER_PID"; then
+            echo "[FAIL] Cannot send SIGTERM" >&2
+            return 1
+        fi
+    fi
+
+    local i
+    for ((i = 0; i < 150; i++)); do
+        if ! daemon_alive "$SERVER_PID" &&
+           [[ ! -e "$SOCK" && ! -e "$PIDF" ]]; then
+            echo "[PASS] Daemon stopped; socket and PID file removed"
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo "[FAIL] Graceful shutdown timed out" >&2
+    return 1
+}
+
+on_exit() {
+    local status="$1"
+    trap - EXIT
+    cleanup || status=1
+    exit "$status"
+}
+
+trap 'on_exit "$?"' EXIT
 
 [[ -x bin/server && -x bin/client ]] || make || exit 1
 [[ -f "$SAMPLE" ]] || { echo "Missing $SAMPLE" >&2; exit 1; }

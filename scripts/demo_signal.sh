@@ -34,12 +34,44 @@ cmd()   { echo "${B}\$ $(recolor "$*" "$B")${X}"; }
 pause() { [ "$PAUSE" = 1 ] && read -rp "   [press Enter] " _; }
 S()     { echo "${B}${COL[$1]}SERVER $1${X}"; }                  # coloured name
 
-alive()   { [ -r "/proc/$1/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status"; }
+alive() {
+    local pid="$1" state
+
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+
+    state=$(awk '$1 == "State:" {print $2; exit}'         "/proc/$pid/status" 2>/dev/null) || return 1
+
+    [[ -n "$state" && "$state" != "Z" && "$state" != "X" ]]
+}
 threads() { ls "/proc/$1/task" 2>/dev/null | wc -l; }
-wait_gone() { local i; for i in $(seq 1 150); do alive "$1" || return 0; sleep 0.1; done; return 1; }
+wait_gone() {
+    local pid="$1" i
+
+    for ((i = 0; i < 150; i++)); do
+        if ! alive "$pid" &&
+           [[ ! -e "$SOCK" && ! -e "$PIDF" ]]; then
+            echo "   [PASS] Server $pid stopped; Socket/PID removed"
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo "   [FAIL] Server $pid shutdown timed out or files remain" >&2
+    return 1
+}
 show_files() {
-    if ls "$SOCK" "$PIDF" >/dev/null 2>&1; then ls -1 "$SOCK" "$PIDF" 2>/dev/null | sed 's/^/   /'
-    else echo "   (none: socket file and PID file are both gone)"; fi
+    if [[ -e "$SOCK" ]]; then
+        printf '   [EXISTS] Socket: %s\n' "$SOCK"
+    else
+        echo "   [REMOVED] Socket"
+    fi
+
+    if [[ -e "$PIDF" ]]; then
+        printf '   [EXISTS] PID file: %s\n' "$PIDF"
+    else
+        echo "   [REMOVED] PID file"
+    fi
 }
 
 roster() {
@@ -53,20 +85,83 @@ roster() {
 }
 
 cleanup() {
-    if [ "$STARTED" = 1 ] && [ -f "$PIDF" ]; then kill -TERM "$(cat "$PIDF")" 2>/dev/null; sleep 0.5; fi
-    rm -rf "$TMP"
+    local rc=0 pid="${SPID[$SRV]:-}"
+
+    if [[ "$STARTED" == 1 ]]; then
+        if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+            echo "[FAIL] Cannot identify demo server PID" >&2
+            rc=1
+        elif alive "$pid"; then
+            if [[ ! -r "$PIDF" ]] ||
+               [[ "$(cat "$PIDF")" != "$pid" ]] ||
+               [[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" != "$(readlink -f "$PWD/bin/server")" ]]; then
+                echo "[FAIL] Server ownership verification failed" >&2
+                rc=1
+            else
+                kill -TERM "$pid" || rc=1
+                wait_gone "$pid" || rc=1
+            fi
+        elif [[ -e "$SOCK" || -e "$PIDF" ]]; then
+            echo "[FAIL] Server exited but resources remain" >&2
+            rc=1
+        fi
+    fi
+
+    rm -rf -- "$TMP" || rc=1
+    return "$rc"
 }
-trap cleanup EXIT
+
+on_exit() {
+    local rc="$1"
+    trap - EXIT
+    cleanup || rc=1
+    exit "$rc"
+}
+
+trap 'on_exit "$?"' EXIT
 
 start_server() {
-    SRV=$((SRV + 1))
-    hist_note "starting SERVER $SRV"
-    echo "   starting $(S "$SRV") ..."
-    ./bin/server -o "$OUT" | sed 's/^/   /' || { echo "server failed to start"; exit 1; }
-    STARTED=1; sleep 0.3
-    SPID[$SRV]=$(cat "$PIDF")
-    STATE[$SRV]="running"
-    echo "   $(S "$SRV") is up: PID ${SPID[$SRV]}"
+    local next=$((SRV + 1))
+    local pid="" i
+
+    if [[ "$STARTED" == 1 ]]; then
+        echo "[FAIL] Previous demo server is still active" >&2
+        return 1
+    fi
+
+    hist_note "starting SERVER $next"
+    echo "   starting $(S "$next") ..."
+
+    if ! ./bin/server -o "$OUT" >"$TMP/start_$next.log" 2>&1; then
+        sed 's/^/   /' "$TMP/start_$next.log"
+        echo "[FAIL] Server failed to start" >&2
+        return 1
+    fi
+
+    sed 's/^/   /' "$TMP/start_$next.log"
+
+    for ((i = 0; i < 30; i++)); do
+        if [[ -s "$PIDF" ]]; then
+            pid=$(cat "$PIDF" 2>/dev/null) || pid=""
+
+            if alive "$pid" &&
+               [[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" == "$(readlink -f "$PWD/bin/server")" ]]; then
+                SRV="$next"
+                SPID[$SRV]="$pid"
+                STARTED=1
+
+                if [[ -S "$SOCK" ]]; then
+                    STATE[$SRV]="running"
+                    echo "   [PASS] $(S "$SRV") started: PID $pid"
+                    return 0
+                fi
+            fi
+        fi
+        sleep 0.1
+    done
+
+    echo "[FAIL] Server startup verification timed out" >&2
+    return 1
 }
 
 [ -x bin/server ] && [ -x bin/client ] || make || exit 1
@@ -92,7 +187,7 @@ pause
 
 step "1. Start $(S 1)"
 cmd "./bin/server -o output.txt"
-start_server
+start_server || exit 1
 echo "   threads: $(threads "${SPID[1]}")  (just the main thread, idle)"
 pause
 
@@ -126,13 +221,38 @@ sleep 0.4
 say "a) it stopped accepting new connections: socket file is gone, a new client is refused"
 show_files
 cmd "./bin/client --ping"
-./bin/client --ping 2>&1 | sed 's/^/   /'
+if ./bin/client --ping >"$TMP/ping_after_term.log" 2>&1; then
+    echo "   [FAIL] New client connected after SIGTERM" >&2
+    cat "$TMP/ping_after_term.log" >&2
+    exit 1
+fi
+
+if ! grep -q 'Cannot connect to' "$TMP/ping_after_term.log"; then
+    echo "   [FAIL] PING failed for an unexpected reason" >&2
+    cat "$TMP/ping_after_term.log" >&2
+    exit 1
+fi
+
+sed 's/^/   /' "$TMP/ping_after_term.log"
+echo "   [PASS] New connections rejected after SIGTERM"
 say "b) but $(S 1) is still alive, finishing the request it already accepted"
 echo "   $(S 1) alive: $(alive "${SPID[1]}" && echo YES || echo NO)"
-wait "$CPID"
+if ! wait "$CPID"; then
+    echo "   [FAIL] In-flight client exited with an error" >&2
+    cat "$TMP/slow.log" >&2
+    exit 1
+fi
+
+if ! grep -Eq 'status[[:space:]]*:[[:space:]]*OK' "$TMP/slow.log"; then
+    echo "   [FAIL] In-flight client did not receive status OK" >&2
+    cat "$TMP/slow.log" >&2
+    exit 1
+fi
+
+echo "   [PASS] In-flight client completed successfully"
 say "c) the in-flight client gets a normal, complete answer (look at the reply time: it started before the signal)"
 sed 's/^/   /' "$TMP/slow.log"
-wait_gone "${SPID[1]}"
+wait_gone "${SPID[1]}" || exit 1
 STARTED=0; STATE[1]="stopped gracefully (SIGTERM): finished its request, cleaned up"
 say "d) only now does $(S 1) exit, and it removed its files"
 echo "   $(S 1) alive: $(alive "${SPID[1]}" && echo YES || echo NO)"
@@ -144,14 +264,44 @@ pause
 
 step "4. Start $(S 2), then kill it hard (SIGKILL) while a request is in flight"
 say "SIGKILL cannot be caught: no handler runs, no cleanup, no goodbye"
-start_server
+start_server || exit 1
 cmd "./bin/client --slow $SAMPLE &      then:  kill -9 ${SPID[2]}   (that is $(S 2))"
 ./bin/client --slow "$SAMPLE" >"$TMP/kill.log" 2>&1 &
 CPID=$!
 sleep 0.8
 hist_note "step 4: SIGKILL sent to SERVER 2 (PID ${SPID[2]}) mid-request - no 'Shutdown' line will follow"
-kill -9 "${SPID[2]}"
-wait "$CPID" 2>/dev/null
+if ! kill -KILL "${SPID[2]}"; then
+    echo "[FAIL] Cannot send SIGKILL to SERVER 2" >&2
+    exit 1
+fi
+
+if wait "$CPID" 2>/dev/null; then
+    echo "[FAIL] Client unexpectedly succeeded after SIGKILL" >&2
+    exit 1
+fi
+
+for ((attempt=0; attempt<30; attempt++)); do
+    alive "${SPID[2]}" || break
+    sleep 0.1
+done
+
+if alive "${SPID[2]}"; then
+    echo "[FAIL] SERVER 2 is still alive" >&2
+    exit 1
+fi
+
+if [[ ! -S "$SOCK" || ! -f "$PIDF" ]] ||
+   [[ "$(cat "$PIDF")" != "${SPID[2]}" ]]; then
+    echo "[FAIL] Expected stale socket/PID not found" >&2
+    exit 1
+fi
+
+if hist_section "$START" | grep -Fq "Shutdown gracefully PID=${SPID[2]}"; then
+    echo "[FAIL] SERVER 2 unexpectedly logged graceful shutdown" >&2
+    exit 1
+fi
+
+echo "   [PASS] SIGKILL: client failed, server stopped, stale files remain"
 STARTED=0; STATE[2]="KILLED (SIGKILL): no cleanup, no goodbye"
 sleep 0.3
 say "the client got no answer:"
@@ -164,16 +314,29 @@ pause
 step "5. Start $(S 3) on top of $(S 2)'s mess"
 say "$(S 3) probes the old socket with connect(): refused -> nobody owns it -> delete it and bind again"
 cmd "./bin/server -o output.txt"
-start_server
+start_server || exit 1
 cmd "./bin/client $SAMPLE"
-./bin/client "$SAMPLE" | sed 's/^/   /'
+if ! ./bin/client "$SAMPLE" >"$TMP/recovery.log" 2>&1; then
+    echo "[FAIL] Recovery client failed" >&2
+    cat "$TMP/recovery.log" >&2
+    exit 1
+fi
+
+if ! grep -Eq 'status[[:space:]]*:[[:space:]]*OK' "$TMP/recovery.log"; then
+    echo "[FAIL] Recovery client did not receive OK" >&2
+    cat "$TMP/recovery.log" >&2
+    exit 1
+fi
+
+sed 's/^/   /' "$TMP/recovery.log"
+echo "   [PASS] SERVER 3 recovered and processed client successfully"
 pause
 
 step "6. Stop $(S 3) politely, then read the whole history"
 cmd "kill -TERM ${SPID[3]}"
 hist_note "step 6: SIGTERM sent to SERVER 3 (PID ${SPID[3]})"
 kill -TERM "${SPID[3]}"
-wait_gone "${SPID[3]}"; STARTED=0; STATE[3]="stopped gracefully (SIGTERM)"
+wait_gone "${SPID[3]}" || exit 1; STARTED=0; STATE[3]="stopped gracefully (SIGTERM)"
 show_files
 echo; roster
 echo

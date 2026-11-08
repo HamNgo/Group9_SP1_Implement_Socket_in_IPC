@@ -12,6 +12,8 @@ done
 LINES_PER_FILE=3
 
 PIDF=/tmp/ipc_group9_server.pid
+SOCK=/tmp/ipc_group9_stream.sock
+SERVER_PID=""
 TMP=$(mktemp -d)
 STARTED=0
 if [ -t 1 ]; then COLOR=1; else COLOR=0; fi
@@ -22,17 +24,122 @@ step()  { echo; echo "${B}${G}=== $(recolor "$*" "$B$G") ===${X}"; }
 say()   { echo "${Y}# $(recolor "$*" "$Y")${X}"; }
 pause() { [ "$PAUSE" = 1 ] && read -rp "   [press Enter] " _; }
 
-cleanup() {
-    if [ "$STARTED" = 1 ] && [ -f "$PIDF" ]; then kill -TERM "$(cat "$PIDF")" 2>/dev/null; sleep 0.5; fi
-    rm -rf "$TMP"
-}
-trap cleanup EXIT
+# Return success only if the process is running (not a zombie).
+server_alive() {
+    local pid="$1"
+    local state
 
-start_server() {   # extra server flags as arguments; always writes to the history file
-    ./bin/server -o "$HIST" "$@" >/dev/null || { echo "server failed to start"; exit 1; }
-    STARTED=1; sleep 0.3
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+
+    state=$(awk '$1 == "State:" {print $2; exit}' \
+        "/proc/$pid/status" 2>/dev/null) || return 1
+
+    [[ -n "$state" && "$state" != "Z" && "$state" != "X" ]]
 }
-stop_server() { kill -TERM "$(cat "$PIDF")" 2>/dev/null; sleep 1; STARTED=0; }
+
+start_server() {
+    local i candidate
+
+    if [[ "$STARTED" == 1 ]]; then
+        echo "[FAIL] A demo server is already active" >&2
+        return 1
+    fi
+
+    ./bin/server -o "$HIST" "$@" >/dev/null || {
+        echo "[FAIL] Server failed to start" >&2
+        return 1
+    }
+
+    # Wait for the daemon to create its PID and socket.
+    for ((i = 0; i < 30; i++)); do
+        if [[ -s "$PIDF" ]]; then
+            candidate=$(cat "$PIDF" 2>/dev/null) || candidate=""
+
+            if server_alive "$candidate" &&
+               [[ "$(readlink -f "/proc/$candidate/exe" 2>/dev/null)" == "$PWD/bin/server" ]]; then
+
+                SERVER_PID="$candidate"
+                STARTED=1
+
+                if [[ -S "$SOCK" ]]; then
+                    echo "[PASS] Server started: PID $SERVER_PID"
+                    return 0
+                fi
+            fi
+        fi
+        sleep 0.1
+    done
+
+    echo "[FAIL] Server startup verification timed out" >&2
+    return 1
+}
+
+stop_server() {
+    [[ "$STARTED" == 1 ]] || return 0
+
+    local pid="$SERVER_PID"
+    local i
+
+    if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[FAIL] Invalid server PID" >&2
+        return 1
+    fi
+
+    if server_alive "$pid"; then
+        if [[ ! -r "$PIDF" ]] ||
+           [[ "$(cat "$PIDF")" != "$pid" ]]; then
+            echo "[FAIL] Server PID verification failed" >&2
+            return 1
+        fi
+
+        if [[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" != "$PWD/bin/server" ]]; then
+            echo "[FAIL] Server executable mismatch" >&2
+            return 1
+        fi
+
+        if ! kill -TERM "$pid"; then
+            echo "[FAIL] Cannot send SIGTERM" >&2
+            return 1
+        fi
+    fi
+
+    # Wait for shutdown and resource cleanup.
+    for ((i = 0; i < 150; i++)); do
+        if ! server_alive "$pid" &&
+           [[ ! -e "$SOCK" && ! -e "$PIDF" ]]; then
+            echo "[PASS] Server $pid stopped; socket and PID removed"
+            STARTED=0
+            SERVER_PID=""
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo "[FAIL] Server $pid shutdown timed out" >&2
+    return 1
+}
+
+cleanup() {
+    local result=0
+
+    if [[ "$STARTED" == 1 ]]; then
+        stop_server || result=1
+    fi
+
+    rm -rf -- "$TMP" || result=1
+    return "$result"
+}
+
+on_exit() {
+    local result="$1"
+    trap - EXIT
+
+    cleanup || result=1
+    exit "$result"
+}
+
+trap 'on_exit "$?"' EXIT
 
 # Prints the file line by line with a gutter showing WHICH CLIENT WROTE each line.
 # '!' marks a line that appeared while the previous client's entry was still unfinished.
@@ -67,7 +174,7 @@ view() {   # $1 = file containing one run's section
 
 # Machine check: every entry whole, containing only its own client's lines.
 verify() {   # $1 = file containing one run's section
-    awk -v expect="$N" '
+    awk -v expect="$N" -v wanted="${2:-}" '
         /\[SYSTEM\]|\[DEMO\]/ { next }
         /^=+$/ { if (st != 0) torn++; st = 1; next }
         /Request from client/ { n++; next }
@@ -76,10 +183,14 @@ verify() {   # $1 = file containing one run's section
         /^--- end/ { if (st != 2) torn++; st = 0; next }
         st == 2 && match($0, /^\[c[0-9]+\]/) { if (substr($0, RSTART + 1, RLENGTH - 2) != tag) mixed++ }
         END {
+            if (st != 0) torn++
             printf "   entries found      : %d / %d\n", n, expect
             printf "   torn entries       : %d\n", torn
             printf "   foreign lines      : %d  (lines inside an entry that belong to another client)\n", mixed
-            if (n == expect && torn == 0 && mixed == 0) print "   RESULT: CLEAN"; else print "   RESULT: CORRUPTED"
+            result = (n == expect && torn == 0 && mixed == 0) ? "CLEAN" : "CORRUPTED"
+              print "   RESULT: " result
+              if (wanted == "CLEAN" && result != "CLEAN") exit 1
+              if (wanted == "CORRUPTED" && (n != expect || (torn == 0 && mixed == 0))) exit 1
         }' "$1"
 }
 
@@ -101,6 +212,10 @@ run_clients() {   # launches $N clients simultaneously and waits
     for i in $(seq 1 "$N"); do grep -q "status : OK" "$TMP/c$i.log" && ok=$((ok + 1)); done
     echo "   clients that received status OK : $ok / $N"
     echo "   peak threads inside the server  : $peak  (1 main + handler threads)"
+    if [ "$ok" -ne "$N" ]; then
+        echo "[FAIL] Only $ok / $N clients succeeded" >&2
+        return 1
+    fi
 }
 
 legend() {
@@ -132,9 +247,9 @@ hist_banner "DEMO 2 / RUN A - multi-client, server started WITH --no-lock" \
             "$N clients at the same moment"
 OFF_A=$(hist_size)
 echo "${B}\$ ./bin/server -o output.txt --no-lock --slow-io${X}"
-start_server --no-lock --slow-io
+start_server --no-lock --slow-io || exit 1
 echo "${B}\$ (launch $N clients at the same moment)${X}"
-run_clients
+run_clients || { echo "[FAIL] Client execution failed" >&2; exit 1; }
 END_A=$(hist_size)
 hist_section "$OFF_A" "$END_A" > "$TMP/runA.txt"
 pause
@@ -143,9 +258,9 @@ step "2. What ended up in output.txt during RUN A (no mutex)"
 legend
 view "$TMP/runA.txt"
 echo
-verify "$TMP/runA.txt"
+verify "$TMP/runA.txt" CORRUPTED || { echo "[FAIL] RUN A verification failed" >&2; exit 1; }
 say "every client was told 'OK', yet the file is scrambled: a race condition fails silently"
-stop_server
+stop_server || exit 1
 hist_end "end of DEMO 2 / RUN A (the damage above is intentional)"
 pause
 
@@ -156,9 +271,9 @@ hist_banner "DEMO 2 / RUN B - multi-client, server started WITH the mutex" \
             "$N clients at the same moment"
 OFF_B=$(hist_size)
 echo "${B}\$ ./bin/server -o output.txt --slow-io${X}"
-start_server --slow-io
+start_server --slow-io || exit 1
 echo "${B}\$ (launch the same $N clients at the same moment)${X}"
-run_clients
+run_clients || { echo "[FAIL] Client execution failed" >&2; exit 1; }
 END_B=$(hist_size)
 hist_section "$OFF_B" "$END_B" > "$TMP/runB.txt"
 pause
@@ -167,9 +282,9 @@ step "4. What ended up in output.txt during RUN B (with mutex)"
 legend
 view "$TMP/runB.txt"
 echo
-verify "$TMP/runB.txt"
+verify "$TMP/runB.txt" CLEAN || { echo "[FAIL] RUN B verification failed" >&2; exit 1; }
 say "clients still run concurrently, but only one thread at a time writes to the file"
-stop_server
+stop_server || exit 1
 hist_end "end of DEMO 2 / RUN B"
 
 step "5. Summary"
