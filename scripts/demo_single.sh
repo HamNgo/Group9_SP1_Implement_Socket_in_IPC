@@ -1,109 +1,71 @@
+
+    
+  
 #!/usr/bin/env bash
-# Narrated demo: ONE client offloading a task to the UNIX-socket daemon.
-# Usage: ./scripts/demo_single.sh [-n]      (-n = no pauses between steps)
+# Demo 1: One client -> UNIX Socket -> daemon -> output file.
+# Usage: bash scripts/demo_single.sh [-n] (-n: no pauses)
 cd "$(dirname "$0")/.." || exit 1
 source scripts/history.sh
 
-PAUSE=1
-[ "${1:-}" = "-n" ] && PAUSE=0
-[ -t 0 ] || PAUSE=0
-
-OUT="$HIST"
 PIDF=/tmp/ipc_group9_server.pid
 SOCK=/tmp/ipc_group9_stream.sock
 SAMPLE=samples/input.txt
-STARTED=0
+OUT="$HIST"
+SERVER_PID=""
+PAUSE=1
+[[ "${1:-}" == "-n" || ! -t 0 ]] && PAUSE=0
 
-if [ -t 1 ]; then B=$(tput bold); G=$(tput setaf 2); Y=$(tput setaf 3); N=$(tput sgr0); else B=; G=; Y=; N=; fi
-
-step()  { echo; echo "${B}${G}=== $* ===${N}"; }
-say()   { echo "${Y}# $*${N}"; }
-run()   { echo "${B}\$ $*${N}"; "$@"; echo; }
-pause() { [ "$PAUSE" = 1 ] && read -rp "   [press Enter] " _; }
-
+step()  { printf '\n=== %s ===\n' "$1"; }
+run()   { printf '$'; printf ' %q' "$@"; printf '\n'; "$@"; }
+pause() { [[ "$PAUSE" == 0 ]] || read -rp '[Enter to continue] ' _; }
 cleanup() {
-    if [ "$STARTED" = 1 ] && [ -f "$PIDF" ]; then kill -TERM "$(cat "$PIDF")" 2>/dev/null; fi
+    # Only stop the daemon this script started.
+    if [[ -n "$SERVER_PID" && -r "$PIDF" ]] &&
+       [[ "$(cat "$PIDF")" == "$SERVER_PID" ]]; then
+        kill -TERM "$SERVER_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
-show_logs() {
-    local out=""
-    if command -v journalctl >/dev/null 2>&1; then
-        out=$(journalctl -t ipc_server -n 8 --no-pager 2>/dev/null | grep ipc_server)
-    fi
-    if [ -z "$out" ] && [ -r /var/log/syslog ]; then
-        out=$(grep ipc_server /var/log/syslog | tail -8)
-    fi
-    if [ -n "$out" ]; then echo "$out"
-    else echo "(syslog not readable here - try: journalctl -t ipc_server)"; fi
-}
-
-[ -x bin/server ] && [ -x bin/client ] || make || exit 1
-if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
-    echo "A server is already running (PID $(cat "$PIDF")). Stop it first."; exit 1
+[[ -x bin/server && -x bin/client ]] || make || exit 1
+[[ -f "$SAMPLE" ]] || { echo "Missing $SAMPLE" >&2; exit 1; }
+if [[ -f "$PIDF" ]] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+    echo "Server already running. Stop it before Demo 1." >&2
+    exit 1
 fi
-hist_banner "DEMO 1 - single client" "one client sends a file in 3 processing modes, plus error cases"
+
+hist_banner "DEMO 1 - single client" "IPC and file processing: stats, upper, reverse"
 START=$(hist_size)
 
-step "1. Start the server as a daemon"
-say "double fork + setsid: it detaches from this terminal and runs in the background"
-run ./bin/server -o "$OUT"
-sleep 0.3
-STARTED=1
-say "the daemon is running, owns a UNIX socket file, and wrote a PID file"
-say "note PPID=1: the daemon was re-parented to init, no terminal (TT = ?)"
-run ps -o pid,ppid,tty,stat,cmd -p "$(cat "$PIDF")"
-run ls -l "$SOCK"
-run cat "$PIDF"
+step "1. Start daemon and check UNIX socket"
+run ./bin/server -o "$OUT" || exit 1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$PIDF" && -S "$SOCK" ]] && break
+    sleep 0.2
+done
+[[ -s "$PIDF" && -S "$SOCK" ]] || { echo "Server did not start correctly" >&2; exit 1; }
+SERVER_PID=$(cat "$PIDF")
+run ps -o pid,ppid,tty,stat,cmd -p "$SERVER_PID" || exit 1
+run ls -l "$SOCK" || exit 1
 pause
 
-step "2. Health check (PING)"
-run ./bin/client --ping
+step "2. Check connection (PING)"
+run ./bin/client --ping || exit 1
 pause
 
-step "3. Offload a task: STATS mode"
-say "client reads the file, sends header + data; server analyzes it and replies with the result"
-run cat "$SAMPLE"
-run ./bin/client -m stats "$SAMPLE"
+step "3. Send input file (STATS)"
+run cat "$SAMPLE" || exit 1
+run ./bin/client -m stats "$SAMPLE" || exit 1
 pause
 
-step "4. Same file, UPPERCASE mode"
-run ./bin/client -m upper "$SAMPLE"
+step "4. Process with UPPER and REVERSE"
+run ./bin/client -m upper "$SAMPLE" || exit 1
+run ./bin/client -m reverse "$SAMPLE" || exit 1
 pause
 
-step "5. Reverse-lines mode"
-run ./bin/client -m reverse "$SAMPLE"
-pause
-
-step "6. What the server wrote to output.txt (with timestamps)"
-echo "${B}\$ cat output.txt     (only the part written during this demo; the file keeps the history of all demos)${N}"
+step "5. Show output written by server"
 hist_section "$START"
-echo
-pause
-
-step "7. Error handling"
-say "corrupted data: the checksum does not match, so the server rejects it"
-./bin/client --bad-checksum "$SAMPLE"; echo
-say "wrong protocol magic number: not our client, rejected"
-./bin/client --bad-magic "$SAMPLE"; echo
-say "missing input file: caught on the client side"
-./bin/client does_not_exist.txt; echo
-pause
-
-step "8. Server-side log (syslog, since a daemon has no terminal)"
-show_logs
-pause
-
-step "9. Graceful shutdown with SIGTERM"
-say "server stops accepting, waits for running handlers, logs, removes socket + PID file"
-run kill -TERM "$(cat "$PIDF")"
-sleep 1
-STARTED=0
-run bash -c "ls /tmp/ipc_group9* 2>&1 || true"
-say "last line of output.txt:"
-run tail -n 1 "$OUT"
-say "client now fails cleanly because no server is listening:"
-./bin/client "$SAMPLE"
-echo
 hist_end "end of DEMO 1"
-echo "${B}${G}Demo finished.${N}"
+echo "Demo 1 finished; stopping its daemon."
+
+
