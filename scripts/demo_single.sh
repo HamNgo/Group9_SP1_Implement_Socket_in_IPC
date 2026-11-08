@@ -56,7 +56,7 @@ cleanup() {
     fi
 
     local i
-    for ((i = 0; i < 150; i++)); do
+    for ((i = 0; i < 350; i++)); do
         if ! daemon_alive "$SERVER_PID" &&
            [[ ! -e "$SOCK" && ! -e "$PIDF" ]]; then
             echo "[PASS] Daemon stopped; socket and PID file removed"
@@ -80,8 +80,9 @@ trap 'on_exit "$?"' EXIT
 
 [[ -x bin/server && -x bin/client ]] || make || exit 1
 [[ -f "$SAMPLE" ]] || { echo "Missing $SAMPLE" >&2; exit 1; }
-if [[ -f "$PIDF" ]] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
-    echo "Server already running. Stop it before Demo 1." >&2
+if [[ -e "$SOCK" || -L "$SOCK" ||
+      -e "$PIDF" || -L "$PIDF" ]]; then
+    echo "[FAIL] Existing Socket/PID detected; inspect before Demo 1" >&2
     exit 1
 fi
 
@@ -90,12 +91,30 @@ START=$(hist_size)
 
 step "1. Start daemon and check UNIX socket"
 run ./bin/server -o "$OUT" || exit 1
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [[ -s "$PIDF" && -S "$SOCK" ]] && break
-    sleep 0.2
+expected_exe=$(readlink -f "$PWD/bin/server") || exit 1
+
+for ((attempt = 0; attempt < 30; attempt++)); do
+    if [[ -s "$PIDF" ]]; then
+        candidate=$(cat "$PIDF" 2>/dev/null) || candidate=""
+
+        if [[ "$candidate" =~ ^[1-9][0-9]*$ ]] &&
+           daemon_alive "$candidate" &&
+           [[ "$(readlink -f "/proc/$candidate/exe" 2>/dev/null)" == "$expected_exe" ]]; then
+            SERVER_PID="$candidate"
+            [[ -S "$SOCK" ]] && break
+        fi
+    fi
+    sleep 0.1
 done
-[[ -s "$PIDF" && -S "$SOCK" ]] || { echo "Server did not start correctly" >&2; exit 1; }
-SERVER_PID=$(cat "$PIDF")
+
+if [[ -z "$SERVER_PID" || ! -S "$SOCK" ]] ||
+   ! daemon_alive "$SERVER_PID" ||
+   [[ "$(readlink -f "/proc/$SERVER_PID/exe" 2>/dev/null)" != "$expected_exe" ]]; then
+    echo "[FAIL] Server startup/PID verification failed" >&2
+    exit 1
+fi
+
+echo "[PASS] Verified server PID $SERVER_PID and UNIX socket"
 run ps -o pid,ppid,tty,stat,cmd -p "$SERVER_PID" || exit 1
 run ls -l "$SOCK" || exit 1
 pause

@@ -48,7 +48,7 @@ threads() { ls "/proc/$1/task" 2>/dev/null | wc -l; }
 wait_gone() {
     local pid="$1" i
 
-    for ((i = 0; i < 150; i++)); do
+    for ((i = 0; i < 350; i++)); do
         if ! alive "$pid" &&
            [[ ! -e "$SOCK" && ! -e "$PIDF" ]]; then
             echo "   [PASS] Server $pid stopped; Socket/PID removed"
@@ -168,7 +168,10 @@ start_server() {
 if [ -f "$PIDF" ] && alive "$(cat "$PIDF")"; then
     echo "A server is already running (PID $(cat "$PIDF")). Stop it first."; exit 1
 fi
-rm -f "$SOCK" "$PIDF"
+if [[ -e "$SOCK" || -L "$SOCK" || -e "$PIDF" || -L "$PIDF" ]]; then
+    echo "[FAIL] Socket/PID file already exists; inspect before running Demo 3" >&2
+    exit 1
+fi
 hist_banner "DEMO 3 - signals and shutdown" \
             "SERVER 1: survives a crashing client, then stopped politely (SIGTERM)" \
             "SERVER 2: killed hard (SIGKILL) - EXPECTED: it has NO 'Shutdown' line" \
@@ -199,13 +202,52 @@ CPID=$!
 sleep 0.8
 echo "   $(S 1) threads while the request is in flight: $(threads "${SPID[1]}")  (main + 1 handler)"
 hist_note "step 2: client killed mid-transfer (SERVER 1, PID ${SPID[1]}, keeps running)"
-{ kill -9 "$CPID"; wait "$CPID"; } 2>/dev/null
-sleep 0.5
-echo "   client killed. $(S 1) still alive: $(alive "${SPID[1]}" && echo YES || echo NO)"
-echo "   $(S 1) threads now: $(threads "${SPID[1]}")  (the handler noticed, cleaned up and exited)"
+if ! kill -KILL "$CPID" 2>/dev/null; then
+    echo "   [FAIL] Could not kill the in-flight client" >&2
+    exit 1
+fi
+
+if wait "$CPID" 2>/dev/null; then
+    echo "   [FAIL] Crashed client unexpectedly exited successfully" >&2
+    exit 1
+fi
+
+# Wait for the handler to detect the disconnected client.
+for ((attempt=0; attempt<30; attempt++)); do
+    [[ "$(threads "${SPID[1]}")" == 1 ]] && break
+    sleep 0.1
+done
+
+if ! alive "${SPID[1]}" ||
+   [[ "$(readlink -f "/proc/${SPID[1]}/exe" 2>/dev/null)" != "$(readlink -f "$PWD/bin/server")" ]]; then
+    echo "   [FAIL] SERVER 1 did not survive the client crash" >&2
+    exit 1
+fi
+
+if [[ "$(threads "${SPID[1]}")" != 1 ]]; then
+    echo "   [FAIL] SERVER 1 handler did not finish after client crash" >&2
+    exit 1
+fi
+
+echo "   [PASS] SERVER 1 remains alive; crashed client's handler exited"
+
 cmd "./bin/client --ping"
-./bin/client --ping | sed 's/^/   /'
-say "SIGPIPE is ignored, the half-received data was discarded, nothing leaked, the server carries on"
+
+if ! ./bin/client --ping >"$TMP/ping_after_crash.log" 2>&1; then
+    echo "   [FAIL] SERVER 1 did not respond to PING after client crash" >&2
+    cat "$TMP/ping_after_crash.log" >&2
+    exit 1
+fi
+
+if ! grep -Eq 'status[[:space:]]*:[[:space:]]*OK' "$TMP/ping_after_crash.log"; then
+    echo "   [FAIL] SERVER 1 PING response did not contain status OK" >&2
+    cat "$TMP/ping_after_crash.log" >&2
+    exit 1
+fi
+
+sed 's/^/   /' "$TMP/ping_after_crash.log"
+echo "   [PASS] SERVER 1 responded to PING after client crash"
+say "SERVER 1 handles a dropped client and continues accepting requests"
 pause
 
 step "3. $(S 1): graceful shutdown, SIGTERM while a request is in flight"
@@ -213,11 +255,34 @@ cmd "./bin/client --slow $SAMPLE &"
 ./bin/client --slow "$SAMPLE" >"$TMP/slow.log" 2>&1 &
 CPID=$!
 sleep 0.8
-echo "   $(S 1) threads: $(threads "${SPID[1]}")  (a request is being received right now)"
+inflight_threads=$(threads "${SPID[1]}")
+
+if ! alive "$CPID" ||
+   ! alive "${SPID[1]}" ||
+   [[ ! "$inflight_threads" =~ ^[0-9]+$ ]] ||
+   (( inflight_threads < 2 )); then
+    echo "   [FAIL] No confirmed in-flight request before SIGTERM" >&2
+    exit 1
+fi
+
+echo "   [PASS] In-flight request confirmed: client PID $CPID, server threads $inflight_threads"
+
 cmd "kill -TERM ${SPID[1]}        <-- signal sent to $(S 1) mid-request"
 hist_note "step 3: SIGTERM sent to SERVER 1 (PID ${SPID[1]}) while a request is in flight"
-kill -TERM "${SPID[1]}"
+
+if ! kill -TERM "${SPID[1]}"; then
+    echo "   [FAIL] Could not send SIGTERM to SERVER 1" >&2
+    exit 1
+fi
+
 sleep 0.4
+
+if ! alive "${SPID[1]}" || ! alive "$CPID"; then
+    echo "   [FAIL] Server/client did not remain active while finishing the request" >&2
+    exit 1
+fi
+
+echo "   [PASS] SERVER 1 remained alive to finish the in-flight request"
 say "a) it stopped accepting new connections: socket file is gone, a new client is refused"
 show_files
 cmd "./bin/client --ping"

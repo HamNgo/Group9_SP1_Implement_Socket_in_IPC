@@ -4,9 +4,23 @@
 cd "$(dirname "$0")/.." || exit 1
 source scripts/history.sh
 
-PAUSE=1; N=3
+PAUSE=1; N=3; N_SET=0
 for a in "$@"; do
-    case "$a" in -n) PAUSE=0 ;; ''|*[!0-9]*) ;; *) N=$a ;; esac
+    case "$a" in
+        -n) PAUSE=0 ;;
+        [2-9]|10)
+            if [[ "$N_SET" == 1 ]]; then
+                echo "[FAIL] Specify the client count only once" >&2
+                exit 2
+            fi
+            N="$a"
+            N_SET=1
+            ;;
+        *)
+            echo "[FAIL] Invalid argument: $a (usage: demo_multi_client.sh [-n] [2-10])" >&2
+            exit 2
+            ;;
+    esac
 done
 [ -t 0 ] || PAUSE=0
 LINES_PER_FILE=3
@@ -105,7 +119,7 @@ stop_server() {
     fi
 
     # Wait for shutdown and resource cleanup.
-    for ((i = 0; i < 150; i++)); do
+    for ((i = 0; i < 350; i++)); do
         if ! server_alive "$pid" &&
            [[ ! -e "$SOCK" && ! -e "$PIDF" ]]; then
             echo "[PASS] Server $pid stopped; socket and PID removed"
@@ -173,25 +187,149 @@ view() {   # $1 = file containing one run's section
 }
 
 # Machine check: every entry whole, containing only its own client's lines.
-verify() {   # $1 = file containing one run's section
-    awk -v expect="$N" -v wanted="${2:-}" '
-        /\[SYSTEM\]|\[DEMO\]/ { next }
-        /^=+$/ { if (st != 0) torn++; st = 1; next }
-        /Request from client/ { n++; next }
-        /^  File      : / { tag = $3; sub(/\.txt$/, "", tag); next }
-        /^--- processed content ---$/ { st = 2; next }
-        /^--- end/ { if (st != 2) torn++; st = 0; next }
-        st == 2 && match($0, /^\[c[0-9]+\]/) { if (substr($0, RSTART + 1, RLENGTH - 2) != tag) mixed++ }
-        END {
-            if (st != 0) torn++
-            printf "   entries found      : %d / %d\n", n, expect
-            printf "   torn entries       : %d\n", torn
-            printf "   foreign lines      : %d  (lines inside an entry that belong to another client)\n", mixed
-            result = (n == expect && torn == 0 && mixed == 0) ? "CLEAN" : "CORRUPTED"
-              print "   RESULT: " result
-              if (wanted == "CLEAN" && result != "CLEAN") exit 1
-              if (wanted == "CORRUPTED" && (n != expect || (torn == 0 && mixed == 0))) exit 1
-        }' "$1"
+verify() {
+    awk -v expect="$N" -v perfile="$LINES_PER_FILE" \
+        -v wanted="${2:-}" '
+    /\[SYSTEM\]|\[DEMO\]/ {
+        if (st != 0) bad++
+        next
+    }
+
+    /^=+$/ {
+        if (st != 0) torn++
+        st = 1
+        step = 0
+        pid = ""
+        tag = ""
+        idx = 0
+        lines = 0
+        next
+    }
+
+    /Request from client/ {
+        n++
+        if (st != 1 || step != 0 ||
+            $0 !~ /^\[[^]]+\] Request from client PID=[0-9]+$/)
+            bad++
+        else {
+            pid = $0
+            sub(/^.*PID=/, "", pid)
+            step = 1
+        }
+        next
+    }
+
+    /^  File      : / {
+        if (st != 1 || step != 1 ||
+            $0 !~ /^  File      : c[0-9]+\.txt$/)
+            bad++
+        else {
+            tag = $3
+            sub(/\.txt$/, "", tag)
+            idx = substr(tag, 2) + 0
+
+            if (idx < 1 || idx > expect || tag != "c" idx)
+                bad++
+
+            seen[tag]++
+            step = 2
+        }
+        next
+    }
+
+    /^  Mode      : STATS$/ {
+        if (st != 1 || step != 2) bad++
+        else step = 3
+        next
+    }
+
+    /^  Size      : [0-9]+ bytes$/ {
+        if (st != 1 || step != 3) bad++
+        else step = 4
+        next
+    }
+
+    /^  Checksum  : 0x[0-9a-fA-F]+ \(verified\)$/ {
+        if (st != 1 || step != 4) bad++
+        else step = 5
+        next
+    }
+
+    /^  Result    : / {
+        if (st != 1 || step != 5) bad++
+        else step = 6
+        next
+    }
+
+    /^  Proc time : / {
+        if (st != 1 || step != 6) bad++
+        else step = 7
+        next
+    }
+
+    /^--- processed content ---$/ {
+        if (st != 1 || step != 7) bad++
+        st = 2
+        next
+    }
+
+    /^--- end/ {
+        if (st != 2 ||
+            $0 !~ /^--- end \[PID=[0-9]+\] ---$/)
+            torn++
+        else {
+            footer = $0
+            sub(/^--- end \[PID=/, "", footer)
+            sub(/\] ---$/, "", footer)
+
+            if (footer != pid || lines != perfile)
+                bad++
+        }
+
+        closed++
+        st = 0
+        next
+    }
+
+    {
+        if (st == 2) {
+            lines++
+            expected = sprintf("[c%d] line %d from client %d", idx, lines, idx)
+
+            if ($0 != expected) {
+                if ($0 ~ /^\[c[0-9]+\]/ &&
+                    index($0, "[c" idx "]") != 1)
+                    mixed++
+                else
+                    bad++
+            }
+        } else if ($0 != "")
+            bad++
+    }
+
+    END {
+        if (st != 0) torn++
+
+        for (i = 1; i <= expect; i++)
+            if (seen["c" i] != 1) bad++
+
+        printf "   entries found      : %d / %d\n", n, expect
+        printf "   torn entries       : %d\n", torn
+        printf "   foreign lines      : %d\n", mixed
+        printf "   invalid fields/lines: %d\n", bad
+
+        result = (n == expect && closed == expect && torn == 0 && mixed == 0 && bad == 0) ? "CLEAN" : "CORRUPTED"
+
+        print "   RESULT: " result
+
+        if (wanted == "CLEAN" && result != "CLEAN")
+            exit 1
+
+        if (wanted == "CORRUPTED" &&
+            (n != expect || result != "CORRUPTED"))
+            exit 1
+    }
+    ' "$1"
 }
 
 run_clients() {   # launches $N clients simultaneously and waits
@@ -208,8 +346,21 @@ run_clients() {   # launches $N clients simultaneously and waits
         [ "$t" -gt "$peak" ] && peak=$t
         [ "$alive" = 0 ] && break
     done
-    wait
-    for i in $(seq 1 "$N"); do grep -q "status : OK" "$TMP/c$i.log" && ok=$((ok + 1)); done
+    for i in $(seq 1 "$N"); do
+        if wait "${pids[$((i - 1))]}"; then
+            rc=0
+        else
+            rc=$?
+        fi
+
+        if [ "$rc" -eq 0 ] &&
+           grep -Eq '^[[:space:]]*status[[:space:]]*:[[:space:]]*OK[[:space:]]*$' "$TMP/c$i.log"; then
+            ok=$((ok + 1))
+        else
+            echo "[FAIL] Client c$i: exit code $rc or missing status OK" >&2
+            sed -n '1,15p' "$TMP/c$i.log" >&2
+        fi
+    done
     echo "   clients that received status OK : $ok / $N"
     echo "   peak threads inside the server  : $peak  (1 main + handler threads)"
     if [ "$ok" -ne "$N" ]; then
@@ -224,8 +375,10 @@ legend() {
 }
 
 [ -x bin/server ] && [ -x bin/client ] || make || exit 1
-if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
-    echo "A server is already running (PID $(cat "$PIDF")). Stop it first."; exit 1
+if [[ -e "$SOCK" || -L "$SOCK" ||
+      -e "$PIDF" || -L "$PIDF" ]]; then
+    echo "[FAIL] Existing Socket/PID detected; inspect before Demo 2" >&2
+    exit 1
 fi
 
 for i in $(seq 1 "$N"); do
